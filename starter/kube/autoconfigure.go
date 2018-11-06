@@ -98,3 +98,11 @@ func (c *configuration) Secret(clientSet ClientSet) *Secret {
 func (c *configuration) Service(clientSet ClientSet) *Service {
 	return NewService(clientSet)
 }
+
+func (c *configuration) Pod(clientSet ClientSet) *Pod {
+	return NewPod(clientSet)
+}
+
+func (c *configuration) Token(restConfig *RestConfig) Token {
+	return Token(restConfig.Config.BearerToken)
+}
