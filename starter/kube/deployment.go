@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"github.com/hidevopsio/hiboot/pkg/log"
 	"github.com/hidevopsio/hiboot/pkg/utils/copier"
-	"k8s.io/api/apps/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	extensionsV1beta1 "k8s.io/api/extensions/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -40,31 +39,41 @@ func newDeployment(clientSet kubernetes.Interface) *Deployment {
 	}
 }
 
+type DeployRequest struct {
+	App            string
+	Namespace      string
+	Version        string
+	DockerRegistry string
+	Env            []corev1.EnvVar
+	Labels         map[string]string
+	Ports          []corev1.ContainerPort
+	Replicas       *int32
+	NodeSelector   map[string]string
+	ReadinessProbe *corev1.Probe
+	LivenessProbe  *corev1.Probe
+}
+
 // @Title Deploy
 // @Description deploy application
 // @Param pipeline
 // @Return error
-func (d *Deployment) Deploy(app, project, profile, imageTag, dockerRegistry string, env interface{}, labels map[string]string, ports interface{}, replicas int32, force bool, healthEndPoint, nodeSelector string) (string, error) {
-
+func (d *Deployment) Deploy(request *DeployRequest) (*extensionsV1beta1.Deployment, error) {
+	runAsRoot := false
 	log.Debug("Deployment.Deploy()")
-	e := make([]corev1.EnvVar, 0)
-	copier.Copy(&e, env)
-	selector := map[string]string{}
-	if nodeSelector != "" {
-		selector[strings.Split(nodeSelector, "=")[0]] = strings.Split(nodeSelector, "=")[1]
-	}
-	p := make([]corev1.ContainerPort, 0)
-	copier.Copy(&p, ports)
-	deploySpec := &v1beta1.Deployment{
+	deploySpec := &extensionsV1beta1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      app,
-			Namespace: project,
+			Name:      fmt.Sprintf("%s-%s", request.App, request.Version),
+			Namespace: request.Namespace,
+			Labels: map[string]string{
+				"app":     request.App,
+				"version": request.Version,
+			},
 		},
-		Spec: v1beta1.DeploymentSpec{
-			Replicas: int32Ptr(1),
-			Strategy: v1beta1.DeploymentStrategy{
-				Type: v1beta1.RollingUpdateDeploymentStrategyType,
-				RollingUpdate: &v1beta1.RollingUpdateDeployment{
+		Spec: extensionsV1beta1.DeploymentSpec{
+			Replicas: request.Replicas,
+			Strategy: extensionsV1beta1.DeploymentStrategy{
+				Type: extensionsV1beta1.RollingUpdateDeploymentStrategyType,
+				RollingUpdate: &extensionsV1beta1.RollingUpdateDeployment{
 					MaxUnavailable: &intstr.IntOrString{
 						Type:   intstr.Int,
 						IntVal: int32(0),
@@ -78,17 +87,25 @@ func (d *Deployment) Deploy(app, project, profile, imageTag, dockerRegistry stri
 			RevisionHistoryLimit: int32Ptr(10),
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:   app,
-					Labels: labels,
+					Name: request.App,
+					Labels: map[string]string{
+						"app":     request.App,
+						"version": request.Version,
+					},
 				},
 				Spec: corev1.PodSpec{
+					SecurityContext: &corev1.PodSecurityContext{
+						RunAsNonRoot: &runAsRoot,
+					},
 					Containers: []corev1.Container{
 						{
-							Name:            app,
-							Image:           dockerRegistry + "/" + project + "/" + app + ":" + imageTag,
-							Ports:           p,
-							Env:             e,
+							Name:            request.App,
+							Image:           request.DockerRegistry + "/" + request.Namespace + "/" + request.App + ":" + request.Version,
+							Ports:           request.Ports,
+							Env:             request.Env,
 							ImagePullPolicy: corev1.PullAlways,
+							ReadinessProbe:  request.ReadinessProbe,
+							LivenessProbe:   request.LivenessProbe,
 						},
 					},
 				},
@@ -100,25 +117,23 @@ func (d *Deployment) Deploy(app, project, profile, imageTag, dockerRegistry stri
 	log.Debug("json", string(j))
 	// Create Deployment
 	//Client.ClientSet.ExtensionsV1beta1().Deployments()
-	deployments := d.clientSet.AppsV1beta1().Deployments(project)
+	deployments := d.clientSet.ExtensionsV1beta1().Deployments(request.Namespace)
 	log.Info("Update or Create Deployment...")
 	result, err := deployments.Update(deploySpec)
-	var retVal string
 	switch {
 	case err == nil:
 		log.Info("Deployment updated")
 	case err != nil:
-		_, err = deployments.Create(deploySpec)
-		retVal = fmt.Sprintf("Created deployment %q.\n", result)
-		log.Info("retval:", err)
+		result, err = deployments.Create(deploySpec)
+		log.Info("deploy: ", err)
 	default:
-		return retVal, fmt.Errorf("could not update deployment controller: %s", err)
+		return result, fmt.Errorf("could not update deployment controller: %s", err)
 	}
 
-	return retVal, err
+	return result, err
 }
 
-func (d *Deployment) ExtensionsV1beta1Deploy(app, project, profile, imageTag, dockerRegistry string, env interface{}, labels map[string]string, ports interface{}, replicas int32, force bool, healthEndPoint, nodeSelector string) (string, error) {
+func (d *Deployment) ExtensionsV1beta1Deploy(app, project, imageTag, dockerRegistry string, env interface{}, labels map[string]string, ports interface{}, replicas int32, force bool, healthEndPoint, nodeSelector string) (string, error) {
 
 	log.Debug("Deployment.Deploy()")
 	e := make([]corev1.EnvVar, 0)
@@ -147,6 +162,12 @@ func (d *Deployment) ExtensionsV1beta1Deploy(app, project, profile, imageTag, do
 						Type:   intstr.Int,
 						IntVal: int32(1),
 					},
+				},
+			},
+			Selector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{
+					"app":     app,
+					"version": imageTag,
 				},
 			},
 			RevisionHistoryLimit: int32Ptr(10),
@@ -247,7 +268,7 @@ func (d *Deployment) DeployNode(deployData *DeployData) (string, error) {
 		})
 	}
 
-	deploySpec := &v1beta1.Deployment{
+	deploySpec := &extensionsV1beta1.Deployment{
 		TypeMeta: metav1.TypeMeta{
 			Kind:       "Deployment",
 			APIVersion: "extensions/v1beta1",
@@ -256,11 +277,11 @@ func (d *Deployment) DeployNode(deployData *DeployData) (string, error) {
 			Name:      deployData.Name,
 			Namespace: deployData.NameSpace,
 		},
-		Spec: v1beta1.DeploymentSpec{
+		Spec: extensionsV1beta1.DeploymentSpec{
 			Replicas: int32Ptr(deployData.Replicas),
-			Strategy: v1beta1.DeploymentStrategy{
-				Type: v1beta1.RollingUpdateDeploymentStrategyType,
-				RollingUpdate: &v1beta1.RollingUpdateDeployment{
+			Strategy: extensionsV1beta1.DeploymentStrategy{
+				Type: extensionsV1beta1.RollingUpdateDeploymentStrategyType,
+				RollingUpdate: &extensionsV1beta1.RollingUpdateDeployment{
 					MaxUnavailable: &intstr.IntOrString{
 						Type:   intstr.Int,
 						IntVal: int32(0),
@@ -294,10 +315,28 @@ func (d *Deployment) DeployNode(deployData *DeployData) (string, error) {
 		},
 	}
 	// Create Deployment
-	deployment, err := d.clientSet.AppsV1beta1().Deployments(deployData.NameSpace).Create(deploySpec)
+	deployment, err := d.clientSet.ExtensionsV1beta1().Deployments(deployData.NameSpace).Create(deploySpec)
 	if err != nil {
 		return "", err
 	}
 	deploymentJson, _ := json.Marshal(deployment)
 	return string(deploymentJson), nil
+}
+
+func (d *Deployment) Delete(name, namespace string, option *metav1.DeleteOptions) error {
+	log.Debugf("delete deployment name :%v, namespace :%v", name, namespace)
+	err := d.clientSet.ExtensionsV1beta1().Deployments(namespace).Delete(name, option)
+	return err
+}
+
+func (d *Deployment) Update(deployment *extensionsV1beta1.Deployment) error {
+	log.Debugf("update deployment name :%v, namespace :%v", deployment.Name, deployment.Namespace)
+	_, err := d.clientSet.ExtensionsV1beta1().Deployments(deployment.Namespace).Update(deployment)
+	return err
+}
+
+func (d *Deployment) Get(name, namespace string, option metav1.GetOptions) (*extensionsV1beta1.Deployment, error) {
+	log.Debugf("get deployment name :%v, namespace :%v", name, namespace)
+	deploy, err := d.clientSet.ExtensionsV1beta1().Deployments(namespace).Get(name, option)
+	return deploy, err
 }
